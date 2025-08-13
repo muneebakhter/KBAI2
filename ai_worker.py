@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
 """
-Simplified AI Worker for DARKBO
-Provides minimal endpoints for querying knowledge bases with sources and external tools.
+Secured AI Worker for KBAI2
+Provides secure endpoints for querying knowledge bases with sources and external tools.
+Includes JWT authentication, API key support, and request tracing.
 """
 
 import os
 import json
 import mimetypes
+import time
+import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-import asyncio
 
-from fastapi import FastAPI, HTTPException, Path as FastAPIPath
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Request, Depends, Response, Query
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-try:
-    import numpy as np
-    from sentence_transformers import SentenceTransformer
-    import faiss
-    from whoosh.index import open_dir
-    from whoosh.qparser import QueryParser
-    import openai
-    from dotenv import load_dotenv
-    HAS_DEPS = True
-except ImportError:
-    HAS_DEPS = False
+# Import security modules
+from storage import DB
+from auth import make_session, issue_token, authenticate_user, get_current_session
+from deps import get_current_auth, require_scopes_unified, KBAI_API_TOKEN
+from models import (
+    TokenRequest, TokenResponse, TracesResponse, TraceItem, MetricsSummary,
+    AuthModes, HealthStatus
+)
+from middleware import TraceMiddleware
 
 # Load environment variables from .env file (optional)
 try:
@@ -36,6 +39,19 @@ except ImportError:
     # dotenv not installed, skip loading .env file
     pass
 
+# Import ML dependencies (optional)
+try:
+    import numpy as np
+    from sentence_transformers import SentenceTransformer
+    import faiss
+    from whoosh.index import open_dir
+    from whoosh.qparser import QueryParser
+    import openai
+    HAS_DEPS = True
+except ImportError:
+    HAS_DEPS = False
+
+# Import core modules
 from api.models import FAQEntry, KBEntry
 from api.storage import FileStorageManager
 try:
@@ -48,7 +64,11 @@ from tools import ToolManager
 # Additional imports for file handling
 from fastapi import File, UploadFile, Form, BackgroundTasks
 import uuid
-import asyncio
+
+# Environment variables for security
+MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", "65536"))
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
+TRACE_DB_PATH = os.getenv("TRACE_DB_PATH", "./kbai_api.db")
 
 
 # Pydantic models for API
@@ -1179,23 +1199,298 @@ Please provide a helpful response based ONLY on the question and available conte
             print(f"Background index rebuild failed for project {project_id}: {e}")
 
 
-# Initialize FastAPI app
+# Initialize FastAPI app with security
 app = FastAPI(
-    title="DARKBO AI Worker",
-    description="Simplified AI worker for querying knowledge bases",
-    version="2.0.0"
+    title="KBAI2 AI Worker",
+    description="Secured AI worker for querying knowledge bases with JWT authentication",
+    version="2.1.0"
 )
 
+# Initialize database for API tracing
+app.state.db = DB(TRACE_DB_PATH)
+app.state.startup_time = time.time()  # Track startup time for uptime calculation
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Tracing middleware (log every request/response)
+app.add_middleware(TraceMiddleware, db=app.state.db, max_request_bytes=MAX_REQUEST_BYTES)
+
+# Templates for admin dashboard
+templates = Jinja2Templates(directory="templates")
+
+# Prometheus metrics (only define if not already registered)
+try:
+    REQUEST_COUNT = Counter("kbai_requests_total", "Total HTTP requests", ["method", "endpoint", "status"])
+    REQUEST_LATENCY = Histogram("kbai_request_latency_seconds", "Request latency", ["endpoint"])
+    READY_GAUGE = Gauge("kbai_ready", "Readiness state (1 ready, 0 not)")
+except ValueError:
+    # Metrics already registered
+    from prometheus_client import REGISTRY
+    REQUEST_COUNT = REGISTRY._names_to_collectors.get("kbai_requests_total")
+    REQUEST_LATENCY = REGISTRY._names_to_collectors.get("kbai_request_latency_seconds")
+    READY_GAUGE = REGISTRY._names_to_collectors.get("kbai_ready")
+
 # Initialize AI worker
-worker = AIWorker()
+worker = AIWorker("./data")
 
 
+# Health and readiness endpoints (no auth required)
+@app.get("/healthz", response_class=PlainTextResponse)
+async def healthz():
+    return "ok"
+
+@app.get("/readyz", response_class=PlainTextResponse)
+async def readyz():
+    # Check database connectivity
+    try:
+        app.state.db.query("SELECT 1")
+        ready = True
+    except Exception:
+        ready = False
+    READY_GAUGE.set(1 if ready else 0)
+    return "ready" if ready else "not ready"
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+# Authentication endpoints (no auth required)
+@app.get("/auth/modes", response_model=AuthModes, tags=["Auth"])
+async def get_auth_modes():
+    """Get available authentication modes."""
+    return AuthModes(
+        jwt_enabled=True,
+        api_key_enabled=True,
+        api_key_configured=bool(KBAI_API_TOKEN)
+    )
+
+@app.post("/auth/token", response_model=TokenResponse, tags=["Auth"])
+async def create_token(req: TokenRequest):
+    # Authenticate user with username/password
+    if not authenticate_user(req.username, req.password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Create session with appropriate scopes
+    sess = make_session(req.client_name, req.scopes, req.ttl_seconds, None)
+    out = issue_token(app.state.db, sess)
+    return TokenResponse(
+        access_token=out["token"], 
+        expires_at=out["expires_at"], 
+        session_id=out["session_id"]
+    )
+
+# Admin dashboard endpoints (no auth required - handles auth in frontend)
+@app.get("/admin", response_class=HTMLResponse, tags=["Admin"])
+async def admin_dashboard(request: Request):
+    return templates.TemplateResponse("admin.html", {"request": request, "title": "KBAI2 Admin"})
+
+@app.get("/dashboard", response_class=HTMLResponse, tags=["Admin"])
+async def dashboard_redirect(request: Request):
+    return templates.TemplateResponse("admin.html", {"request": request, "title": "KBAI2 Admin"})
+
+
+# Observability endpoints (require auth)
+@app.get("/traces", response_model=TracesResponse, tags=["Observability"])
+async def list_traces(
+    request: Request,
+    auth: dict = Depends(get_current_auth),
+    since: Optional[str] = Query(None, description="ISO timestamp"),
+    limit: int = Query(100, ge=1, le=1000),
+    status_code: Optional[int] = Query(None, ge=100, le=599),
+    path: Optional[str] = Query(None, description="Path substring filter"),
+    ip: Optional[str] = Query(None),
+    has_error: Optional[bool] = Query(None, description="Filter by error presence"),
+    since_seconds: Optional[int] = Query(None, description="Filter traces from N seconds ago"),
+):
+    # Check if user has required scopes (API key users have full access)
+    if auth.get("auth_method") == "jwt":
+        scopes = auth.get("scopes", [])
+        if "read:basic" not in scopes and "read:traces" not in scopes:
+            raise HTTPException(status_code=403, detail="insufficient permissions")
+    
+    rows = app.state.db.list_traces(
+        since=since, 
+        limit=limit, 
+        status=status_code, 
+        path=path, 
+        ip=ip,
+        has_error=has_error,
+        since_seconds=since_seconds
+    )
+    items = []
+    for r in rows:
+        items.append(TraceItem(
+            id=r["id"], ts=r["ts"], method=r["method"], path=r["path"],
+            status=r["status"], latency_ms=r["latency_ms"], ip=r["ip"], ua=r["ua"],
+            headers_slim=(json.loads(r["headers_slim"]) if r["headers_slim"] else None),
+            query=(json.loads(r["query"]) if r["query"] else None),
+            body_sha256=r["body_sha256"], token_sub=r["token_sub"], error=r["error"]
+        ))
+    return TracesResponse(items=items, next_cursor=None)
+
+@app.get("/traces/{trace_id}", response_model=TraceItem, tags=["Observability"])
+async def get_trace(
+    trace_id: str,
+    request: Request,
+    auth: dict = Depends(get_current_auth)
+):
+    """Get a single trace by ID."""
+    # Check if user has required scopes (API key users have full access)
+    if auth.get("auth_method") == "jwt":
+        scopes = auth.get("scopes", [])
+        if "read:basic" not in scopes and "read:traces" not in scopes:
+            raise HTTPException(status_code=403, detail="insufficient permissions")
+    
+    row = app.state.db.get_trace_by_id(trace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    
+    return TraceItem(
+        id=row["id"], ts=row["ts"], method=row["method"], path=row["path"],
+        status=row["status"], latency_ms=row["latency_ms"], ip=row["ip"], ua=row["ua"],
+        headers_slim=(json.loads(row["headers_slim"]) if row["headers_slim"] else None),
+        query=(json.loads(row["query"]) if row["query"] else None),
+        body_sha256=row["body_sha256"], token_sub=row["token_sub"], error=row["error"]
+    )
+
+@app.get("/metrics/summary", response_model=MetricsSummary, tags=["Observability"])
+async def metrics_summary(
+    request: Request,
+    auth: dict = Depends(get_current_auth),
+    window_seconds: int = Query(3600, ge=60, le=24*3600)
+):
+    # Check if user has required scopes (API key users have full access)
+    if auth.get("auth_method") == "jwt":
+        scopes = auth.get("scopes", [])
+        if "read:basic" not in scopes and "read:metrics" not in scopes:
+            raise HTTPException(status_code=403, detail="insufficient permissions")
+    
+    data = app.state.db.metrics_summary(window_seconds=window_seconds)
+    return data
+
+@app.get("/admin/health/status", response_model=HealthStatus, tags=["Admin"])
+async def health_status(request: Request, auth: dict = Depends(get_current_auth)):
+    """Get comprehensive health status."""
+    uptime = time.time() - app.state.startup_time
+    
+    # Check database connectivity
+    try:
+        app.state.db.query("SELECT 1")
+        db_status = "connected"
+        status = "healthy"
+    except Exception:
+        db_status = "disconnected"
+        status = "unhealthy"
+    
+    return HealthStatus(
+        status=status,
+        database=db_status,
+        uptime_seconds=uptime,
+        version="2.1.0"
+    )
+
+@app.get("/admin/metrics/stream", tags=["Admin"])
+async def metrics_stream(
+    request: Request, 
+    api_key: Optional[str] = Query(None),
+    token: Optional[str] = Query(None)
+):
+    """Server-Sent Events stream for real-time metrics updates."""
+    
+    # Authenticate using query parameters (since SSE can't use custom headers)
+    auth_valid = False
+    if api_key and api_key == KBAI_API_TOKEN:
+        auth_valid = True
+    elif token:
+        try:
+            from auth import decode_token
+            claims = decode_token(token)
+            # Simple validation - in production you'd want to check session validity
+            if claims.get("sub"):
+                auth_valid = True
+        except Exception:
+            pass
+    
+    if not auth_valid:
+        raise HTTPException(status_code=401, detail="Invalid authentication for SSE")
+    
+    async def event_generator():
+        """Generate SSE events with metrics data."""
+        try:
+            while True:
+                # Get latest metrics
+                try:
+                    metrics_data = app.state.db.metrics_summary(window_seconds=300)  # 5 minute window
+                    
+                    # Get recent traces (last 10)
+                    recent_traces = app.state.db.list_traces(
+                        since=None, limit=10, status=None, path=None, ip=None
+                    )
+                    
+                    traces_data = []
+                    for r in recent_traces:
+                        traces_data.append({
+                            "id": r["id"],
+                            "ts": r["ts"],
+                            "method": r["method"],
+                            "path": r["path"],
+                            "status": r["status"],
+                            "latency_ms": r["latency_ms"],
+                            "ip": r["ip"],
+                            "auth_method": "api_key" if r["token_sub"] == "api_key_auth" else "jwt"
+                        })
+                    
+                    # Combine data
+                    event_data = {
+                        "metrics": metrics_data,
+                        "recent_traces": traces_data,
+                        "timestamp": time.time()
+                    }
+                    
+                    yield f"data: {json.dumps(event_data)}\n\n"
+                    
+                except Exception as e:
+                    error_data = {
+                        "error": str(e),
+                        "timestamp": time.time()
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                
+                # Wait 5 seconds before next update
+                await asyncio.sleep(5)
+                
+        except asyncio.CancelledError:
+            print("SSE connection cancelled")
+            return
+        except Exception as e:
+            print(f"SSE error: {e}")
+            return
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
+
+# Main AI endpoints (require auth)
 @app.get("/")
-async def root():
+async def root(auth: dict = Depends(get_current_auth)):
     """Root endpoint"""
     return {
-        "name": "DARKBO AI Worker",
-        "description": "Simplified AI worker for querying knowledge bases with external tools support",
+        "name": "KBAI2 AI Worker",
+        "description": "Secured AI worker for querying knowledge bases with external tools support",
         "version": "2.1.0",
         "endpoints": {
             "query": "POST /query",
@@ -1209,18 +1504,19 @@ async def root():
             "rebuild_indexes": "POST /projects/{project_id}/rebuild-indexes",
             "build_status": "GET /projects/{project_id}/build-status"
         },
-        "tools_available": len(worker.tool_manager.get_enabled_tools())
+        "tools_available": len(worker.tool_manager.get_enabled_tools()),
+        "auth_method": auth.get("auth_method"),
+        "session_id": auth.get("session_id")
     }
 
-
 @app.get("/health")
-async def health():
+async def health(auth: dict = Depends(get_current_auth)):
     """Health check"""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/projects")
-async def list_projects():
+async def list_projects(auth: dict = Depends(get_current_auth)):
     """List available projects"""
     return {
         "projects": [
@@ -1231,7 +1527,7 @@ async def list_projects():
 
 
 @app.post("/query")
-async def query(request: QueryRequest) -> QueryResponse:
+async def query(request: QueryRequest, auth: dict = Depends(get_current_auth)) -> QueryResponse:
     """Answer a question with sources and optional tool assistance"""
     try:
         if request.project_id not in worker.projects:
@@ -1245,7 +1541,7 @@ async def query(request: QueryRequest) -> QueryResponse:
 
 
 @app.get("/tools")
-async def list_tools():
+async def list_tools(auth: dict = Depends(get_current_auth)):
     """List available tools"""
     return {
         "tools": worker.tool_manager.list_tools()
@@ -1255,7 +1551,8 @@ async def list_tools():
 @app.post("/tools/{tool_name}")
 async def execute_tool(
     tool_name: str = FastAPIPath(..., description="Tool name"),
-    parameters: Dict[str, Any] = {}
+    parameters: Dict[str, Any] = {},
+    auth: dict = Depends(get_current_auth)
 ):
     """Execute a specific tool with given parameters"""
     try:
@@ -1269,7 +1566,8 @@ async def execute_tool(
 async def upload_document(
     project_id: str = FastAPIPath(..., description="Project ID"),
     file: UploadFile = File(..., description="Document file (PDF or DOCX)"),
-    article_title: Optional[str] = Form(None, description="Optional article title")
+    article_title: Optional[str] = Form(None, description="Optional article title"),
+    auth: dict = Depends(get_current_auth)
 ) -> DocumentUploadResponse:
     """Upload and process a document for ingestion into the knowledge base"""
     return await worker.ingest_document(project_id, file, article_title)
@@ -1278,7 +1576,8 @@ async def upload_document(
 @app.post("/projects/{project_id}/faqs")
 async def add_faq(
     faq_request: FAQCreateRequest,
-    project_id: str = FastAPIPath(..., description="Project ID")
+    project_id: str = FastAPIPath(..., description="Project ID"),
+    auth: dict = Depends(get_current_auth)
 ) -> DocumentUploadResponse:
     """Add a new FAQ entry to the project"""
     return await worker.add_faq(project_id, faq_request.question, faq_request.answer)
@@ -1286,7 +1585,8 @@ async def add_faq(
 
 @app.post("/projects/{project_id}/rebuild-indexes")
 async def rebuild_indexes(
-    project_id: str = FastAPIPath(..., description="Project ID")
+    project_id: str = FastAPIPath(..., description="Project ID"),
+    auth: dict = Depends(get_current_auth)
 ) -> IndexBuildResponse:
     """Manually trigger index rebuild for a project"""
     return await worker.rebuild_indexes(project_id)
@@ -1294,7 +1594,8 @@ async def rebuild_indexes(
 
 @app.get("/projects/{project_id}/build-status")
 async def get_build_status(
-    project_id: str = FastAPIPath(..., description="Project ID")
+    project_id: str = FastAPIPath(..., description="Project ID"),
+    auth: dict = Depends(get_current_auth)
 ) -> IndexBuildResponse:
     """Get current index build status for a project"""
     return await worker.get_build_status(project_id)
@@ -1303,7 +1604,8 @@ async def get_build_status(
 @app.get("/v1/projects/{project_id}/faqs/{faq_id}")
 async def get_faq(
     project_id: str = FastAPIPath(..., description="Project ID"),
-    faq_id: str = FastAPIPath(..., description="FAQ ID")
+    faq_id: str = FastAPIPath(..., description="FAQ ID"),
+    auth: dict = Depends(get_current_auth)
 ):
     """Get FAQ by ID, returns attachment file if available, otherwise JSON"""
     
@@ -1330,7 +1632,8 @@ async def get_faq(
 @app.get("/v1/projects/{project_id}/kb/{kb_id}")
 async def get_kb(
     project_id: str = FastAPIPath(..., description="Project ID"),
-    kb_id: str = FastAPIPath(..., description="KB ID")
+    kb_id: str = FastAPIPath(..., description="KB ID"),
+    auth: dict = Depends(get_current_auth)
 ):
     """Get KB entry by ID, returns attachment file if available, otherwise JSON"""
     
@@ -1390,9 +1693,13 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8000))
     
-    print(f"🚀 Starting DARKBO AI Worker on {host}:{port}")
+    print(f"🚀 Starting KBAI2 AI Worker on {host}:{port}")
     print(f"📁 Base directory: {worker.base_dir}")
     print(f"📊 Projects loaded: {len(worker.projects)}")
+    print(f"🔐 Security: JWT + API Key authentication enabled")
+    print(f"📊 Database: {TRACE_DB_PATH}")
+    print(f"🎛️  Admin Dashboard: http://{host}:{port}/admin")
+    print(f"🔑 Default credentials: admin/admin")
     
     if not HAS_DEPS:
         print("⚠️  Some dependencies missing. Search will be limited.")
