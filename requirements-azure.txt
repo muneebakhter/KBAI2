@@ -1,0 +1,17 @@
+# Azure Storage Dependencies for KBAI
+# Install these packages based on your chosen storage backend
+
+# For Azure File Share storage backend
+azure-storage-file-share>=12.0.0
+
+# For Azure Blob Storage backend
+azure-storage-blob>=12.0.0
+
+# For Azure CosmosDB storage backend
+azure-cosmos>=4.0.0
+
+# For Azure Identity (managed identity support)
+azure-identity>=1.0.0
+
+# For Azure Key Vault (secrets management)
+azure-keyvault-secrets>=4.0.0

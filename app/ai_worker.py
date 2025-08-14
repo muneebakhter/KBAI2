@@ -42,7 +42,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kb_api.models import FAQEntry, KBEntry
-from kb_api.storage import FileStorageManager
+from kb_api.storage_factory import create_storage_from_env
 try:
     from kb_api.document_processor import process_document_for_kb
 except ImportError:
@@ -425,10 +425,10 @@ class AIWorker:
     
     def __init__(self, base_dir: str = "."):
         self.base_dir = Path(base_dir)
-        self.projects = self._load_projects()
         self.retrievers = {}  # Cache retrievers
         self.tool_manager = ToolManager()  # Initialize tool manager
-        self.storage = FileStorageManager(str(self.base_dir))  # Storage manager
+        self.storage = create_storage_from_env(str(self.base_dir))  # Configurable storage manager
+        self.projects = self._load_projects()  # Load after storage is initialized
         
         # Initialize OpenAI client
         self.openai_client = None
@@ -437,32 +437,7 @@ class AIWorker:
     
     def _load_projects(self) -> Dict[str, str]:
         """Load project mapping (only active projects)"""
-        mapping_file = self.base_dir / "proj_mapping.txt"
-        projects = {}
-        
-        if mapping_file.exists():
-            with open(mapping_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        # Support both pipe-separated (new) and tab-separated (old) formats
-                        if '|' in line:
-                            parts = line.split('|', 3)
-                            if len(parts) >= 2:
-                                project_id, name = parts[0].strip(), parts[1].strip()
-                                # Check active flag if present (default to active if not specified)
-                                active = True
-                                if len(parts) >= 3:
-                                    active = parts[2].strip() == '1'
-                                
-                                # Only include active projects
-                                if active:
-                                    projects[project_id] = name
-                        elif '\t' in line:
-                            project_id, name = line.split('\t', 1)
-                            projects[project_id.strip()] = name.strip()
-        
-        return projects
+        return self.storage.load_project_mapping()
     
     def refresh_projects(self):
         """Refresh the projects list from disk"""
