@@ -8,9 +8,10 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from kb_api.models import FAQEntry, KBEntry
+from kb_api.storage_interface import StorageInterface
 
 
-class FileStorageManager:
+class FileStorageManager(StorageInterface):
     """Simple file-based storage for testing"""
     
     def __init__(self, base_dir: str = "."):
@@ -247,3 +248,40 @@ class FileStorageManager:
             with open(meta_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         return {"error": "No index metadata found"}
+    
+    def get_attachment(self, project_id: str, filename: str) -> Optional[bytes]:
+        """Get attachment file content"""
+        file_path = self.base_dir / project_id / "attachments" / filename
+        if file_path.exists():
+            with open(file_path, 'rb') as f:
+                return f.read()
+        return None
+    
+    def delete_attachment(self, project_id: str, filename: str) -> bool:
+        """Delete attachment file. Returns True if deleted, False if not found."""
+        file_path = self.base_dir / project_id / "attachments" / filename
+        if file_path.exists():
+            file_path.unlink()
+            return True
+        return False
+    
+    def list_attachments(self, project_id: str) -> List[str]:
+        """List all attachment filenames for a project"""
+        attachments_dir = self.base_dir / project_id / "attachments"
+        if not attachments_dir.exists():
+            return []
+        
+        filenames = []
+        for file_path in attachments_dir.iterdir():
+            if file_path.is_file():
+                filenames.append(file_path.name)
+        return filenames
+    
+    def save_index_metadata(self, project_id: str, metadata: Dict):
+        """Save index metadata for a project"""
+        index_dir = self.base_dir / project_id / "index"
+        index_dir.mkdir(parents=True, exist_ok=True)
+        
+        meta_file = index_dir / "meta.json"
+        with open(meta_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)

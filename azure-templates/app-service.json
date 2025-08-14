@@ -1,0 +1,235 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "appServicePlanName": {
+            "type": "string",
+            "defaultValue": "[concat('kbai-plan-', uniqueString(resourceGroup().id))]",
+            "metadata": {
+                "description": "Name of the App Service Plan"
+            }
+        },
+        "webAppName": {
+            "type": "string",
+            "defaultValue": "[concat('kbai-app-', uniqueString(resourceGroup().id))]",
+            "metadata": {
+                "description": "Name of the Web App"
+            }
+        },
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]",
+            "metadata": {
+                "description": "Location for all resources"
+            }
+        },
+        "skuName": {
+            "type": "string",
+            "defaultValue": "B1",
+            "allowedValues": [
+                "F1",
+                "D1",
+                "B1",
+                "B2",
+                "B3",
+                "S1",
+                "S2",
+                "S3",
+                "P1",
+                "P2",
+                "P3",
+                "P1V2",
+                "P2V2",
+                "P3V2",
+                "P1V3",
+                "P2V3",
+                "P3V3"
+            ],
+            "metadata": {
+                "description": "The SKU of App Service Plan"
+            }
+        },
+        "linuxFxVersion": {
+            "type": "string",
+            "defaultValue": "PYTHON|3.11",
+            "metadata": {
+                "description": "The Runtime stack of current web app"
+            }
+        },
+        "repoUrl": {
+            "type": "string",
+            "defaultValue": "https://github.com/muneebakhter/KBAI2.git",
+            "metadata": {
+                "description": "Git repository URL"
+            }
+        },
+        "branch": {
+            "type": "string",
+            "defaultValue": "main",
+            "metadata": {
+                "description": "Git repository branch"
+            }
+        },
+        "storageType": {
+            "type": "string",
+            "defaultValue": "file",
+            "allowedValues": [
+                "file",
+                "azure_fileshare",
+                "azure_blob",
+                "cosmosdb"
+            ],
+            "metadata": {
+                "description": "Storage backend type"
+            }
+        },
+        "azureStorageConnectionString": {
+            "type": "string",
+            "defaultValue": "",
+            "metadata": {
+                "description": "Azure Storage connection string (for fileshare/blob storage)"
+            }
+        },
+        "cosmosEndpoint": {
+            "type": "string",
+            "defaultValue": "",
+            "metadata": {
+                "description": "Cosmos DB endpoint URL"
+            }
+        },
+        "cosmosKey": {
+            "type": "string",
+            "defaultValue": "",
+            "metadata": {
+                "description": "Cosmos DB primary key"
+            }
+        },
+        "openaiApiKey": {
+            "type": "string",
+            "defaultValue": "",
+            "metadata": {
+                "description": "OpenAI API key"
+            }
+        },
+        "authSigningKey": {
+            "type": "string",
+            "defaultValue": "[concat('prod-signing-key-', uniqueString(resourceGroup().id))]",
+            "metadata": {
+                "description": "JWT signing key for authentication"
+            }
+        }
+    },
+    "variables": {
+        "webAppName": "[toLower(parameters('webAppName'))]",
+        "appServicePlanName": "[toLower(parameters('appServicePlanName'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Web/serverfarms",
+            "apiVersion": "2021-02-01",
+            "name": "[variables('appServicePlanName')]",
+            "location": "[parameters('location')]",
+            "sku": {
+                "name": "[parameters('skuName')]"
+            },
+            "kind": "linux",
+            "properties": {
+                "reserved": true
+            }
+        },
+        {
+            "type": "Microsoft.Web/sites",
+            "apiVersion": "2021-02-01",
+            "name": "[variables('webAppName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]"
+            ],
+            "properties": {
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]",
+                "siteConfig": {
+                    "linuxFxVersion": "[parameters('linuxFxVersion')]",
+                    "appCommandLine": "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000",
+                    "appSettings": [
+                        {
+                            "name": "PORT",
+                            "value": "8000"
+                        },
+                        {
+                            "name": "HOST",
+                            "value": "0.0.0.0"
+                        },
+                        {
+                            "name": "STORAGE_TYPE",
+                            "value": "[parameters('storageType')]"
+                        },
+                        {
+                            "name": "AZURE_STORAGE_CONNECTION_STRING",
+                            "value": "[parameters('azureStorageConnectionString')]"
+                        },
+                        {
+                            "name": "COSMOS_ENDPOINT",
+                            "value": "[parameters('cosmosEndpoint')]"
+                        },
+                        {
+                            "name": "COSMOS_KEY",
+                            "value": "[parameters('cosmosKey')]"
+                        },
+                        {
+                            "name": "OPENAI_API_KEY",
+                            "value": "[parameters('openaiApiKey')]"
+                        },
+                        {
+                            "name": "AUTH_SIGNING_KEY",
+                            "value": "[parameters('authSigningKey')]"
+                        },
+                        {
+                            "name": "RELOAD",
+                            "value": "false"
+                        },
+                        {
+                            "name": "DEBUG",
+                            "value": "false"
+                        },
+                        {
+                            "name": "LOG_LEVEL",
+                            "value": "INFO"
+                        },
+                        {
+                            "name": "ALLOWED_ORIGINS",
+                            "value": "*"
+                        }
+                    ]
+                },
+                "httpsOnly": true
+            }
+        },
+        {
+            "type": "Microsoft.Web/sites/sourcecontrols",
+            "apiVersion": "2021-02-01",
+            "name": "[concat(variables('webAppName'), '/web')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/sites', variables('webAppName'))]"
+            ],
+            "properties": {
+                "repoUrl": "[parameters('repoUrl')]",
+                "branch": "[parameters('branch')]",
+                "isManualIntegration": true
+            }
+        }
+    ],
+    "outputs": {
+        "webAppName": {
+            "type": "string",
+            "value": "[variables('webAppName')]"
+        },
+        "webAppUrl": {
+            "type": "string",
+            "value": "[concat('https://', variables('webAppName'), '.azurewebsites.net')]"
+        },
+        "appServicePlanName": {
+            "type": "string",
+            "value": "[variables('appServicePlanName')]"
+        }
+    }
+}
