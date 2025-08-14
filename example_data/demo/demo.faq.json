@@ -1,0 +1,11 @@
+[
+  {
+    "id": "faq1",
+    "question": "What is KBAI?",
+    "answer": "KBAI is a Knowledge Base AI system for enterprise document management.",
+    "created_at": "2025-08-14T08:14:51.103064",
+    "updated_at": "2025-08-14T08:14:51.103070",
+    "source": "manual",
+    "source_file": null
+  }
+]
