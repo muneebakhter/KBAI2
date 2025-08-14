@@ -10,8 +10,8 @@ from pathlib import Path
 # Add the current directory to Python path
 sys.path.insert(0, os.path.abspath('.'))
 
-from api.storage import FileStorageManager
-from api.models import FAQEntry, KBEntry
+from kb_api.storage import FileStorageManager
+from kb_api.models import FAQEntry, KBEntry
 
 def create_sample_data():
     """Create sample data structure"""

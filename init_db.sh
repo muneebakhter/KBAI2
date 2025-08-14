@@ -4,9 +4,16 @@ set -euo pipefail
 # KBAI API Database Initialization Script
 echo "Initializing KBAI API database..."
 
+# Get script directory and set paths relative to project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR"
+
 # Configuration
-DB_PATH="./kbai_api.db"
-SCHEMA_PATH="./schema.sql"
+DB_PATH="$PROJECT_ROOT/app/kbai_api.db"
+SCHEMA_PATH="$PROJECT_ROOT/app/schema.sql"
+
+# Create app directory if it doesn't exist
+mkdir -p "$PROJECT_ROOT/app"
 
 # Remove existing database if it exists
 if [ -f "$DB_PATH" ]; then
@@ -49,4 +56,4 @@ fi
 
 echo ""
 echo "🚀 Database initialization complete!"
-echo "You can now run the API with: python3 ai_worker.py"
+echo "You can now run the API with: ./run_api.sh"

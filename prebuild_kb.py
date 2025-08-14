@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List
 
 # Import the new versioned IndexBuilder
-from api.index_versioning import IndexBuilder
+from kb_api.index_versioning import IndexBuilder
 
 
 def check_required_dependencies() -> bool:

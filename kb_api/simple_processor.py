@@ -131,7 +131,7 @@ def process_document_for_kb(file_path: str, article_title: str = None) -> Tuple[
     """
     # Try to import full document processor first
     try:
-        from api.document_processor import DocumentProcessor
+        from kb_api.document_processor import DocumentProcessor
         processor = DocumentProcessor()
         
         # Use full processor if dependencies are available

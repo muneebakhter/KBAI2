@@ -43,6 +43,39 @@ class MetricsSummary(BaseModel):
     unauthorized: int
     p95_latency_ms: Optional[float] = None
 
+# Existing models from the original app
+class Project(BaseModel):
+    id: str = Field(..., description="Project identifier")
+    name: str = Field(..., description="Human-readable name")
+    active: bool = True
+
+class FAQ(BaseModel):
+    id: str
+    question: str
+    answer: str
+
+class KBArticle(BaseModel):
+    id: str
+    title: str
+    content: str
+    source: Optional[str] = None
+    source_file: Optional[str] = None
+    chunk_index: Optional[int] = None
+
+class BatchFAQUpsertRequest(BaseModel):
+    items: List[FAQ]
+
+class BatchKBUpsertRequest(BaseModel):
+    items: List[KBArticle]
+
+class QueryRequest(BaseModel):
+    project_id: str
+    question: str
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[str] = []
+
 class AuthModes(BaseModel):
     jwt_enabled: bool = True
     api_key_enabled: bool = True
